@@ -1,0 +1,297 @@
+---
+title: "FDD3451"
+author: "Hong"
+date: "2024-03-01"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, class.source = "watch-out",
+                      fig.width=3, fig.height=3,fig.align='left',
+                      fig.pos = "H")
+```
+
+#### Loading packages
+```{r, include=FALSE}
+pkgs = c("tidyverse","hablar","sjmisc","xlsx","gplots","smplot2", "Seurat","openxlsx",
+         "readxl","MuSiC","SingleCellExperiment","reshape2","cowplot","bseqsc")
+for (i in pkgs){
+  if(! i %in% installed.packages()){
+    BiocManager::install(i, ask = F, update = F)
+  }
+}
+invisible(lapply(pkgs, function(x) library(x, character.only=TRUE)))
+rm(pkgs, i)
+```
+
+
+- Reproduce the code provided in paper
+- Compare the influence of different measures on the output
+- Compare to other method
+
+#### Material and method
+- Reproducibility
+
+Trough a step-by-step replication of the MUSIC tutorial,I got most of code run successfully but encountered challenges with function bulk_construct(). This function is used for the last step of 'Estimation of cell type proportions with pre-grouping of cell types', which handles the colinearity in bulk sequencing data due to closely related cell types in solid tissues. 
+
+```{r, include=FALSE}
+### Bulk RNA-seq
+GSE50244.bulk.eset = readRDS('data/GSE50244bulkeset.rds')
+bulk.mtx = exprs(GSE50244.bulk.eset)
+bulk.meta = phenoData(GSE50244.bulk.eset)@data
+#### Single-cell
+EMTAB.sce = readRDS('data/EMTABesethealthy.rds')
+```
+
+- Robustness of MUSIC
+
+1. Tuning parameters - Threshold of convergence (eps)
+
+```{r, include=FALSE}
+# Estimate cell type proportions
+# Create dataframe for beta cell proportions and HbA1c levels
+res = ''
+Est.prop.list = list()
+eps = c(0.1, 0.01, 0.001, 0.0001)
+for(i in eps){
+  Est.prop.res = music_prop(bulk.mtx = bulk.mtx, 
+                               sc.sce =  EMTAB.sce,
+                               eps = i,
+                               clusters = 'cellType',
+                               samples = 'sampleID', 
+                               select.ct = c('alpha', 'beta', 'delta', 'gamma',
+                                             'acinar', 'ductal'), verbose = F)
+  m.prop.ana = data.frame(
+    pData(GSE50244.bulk.eset)[rep(1:89, 1),
+                              c('age', 'bmi', 'hba1c', 'gender')],
+    ct.prop = Est.prop.res$Est.prop.weighted[, 2],
+    eps = paste0('eps: ', i),
+    Method = 'MuSiC'
+  ) %>% rownames_to_column(., var = 'Sample')
+  colnames(m.prop.ana)[1:5] = c('Sample','Age', 'BMI', 'HbA1c', 'Gender')
+  m.prop.ana = subset(m.prop.ana,!is.na(HbA1c))
+  m.prop.ana$Disease = factor(c('Normal', 'T2D')[(m.prop.ana$HbA1c > 6.5) + 1], c('Normal', 'T2D'))
+  m.prop.ana$D = (m.prop.ana$Disease == 'T2D') / 5
+  
+  res = rbind(res, m.prop.ana)
+}
+
+res = res[-1,]
+
+p1 = res %>%            
+  convert(num(HbA1c, ct.prop, D)) %>% 
+  convert(chr(eps)) %>% 
+  ggplot(., aes(HbA1c, ct.prop)) + 
+  #geom_smooth(method = 'lm',  se = FALSE, col = 'black', lwd = 0.25) +
+  sm_statCorr() +
+  geom_point(aes(fill = eps, color = Disease, stroke = D,
+                 shape = Disease), size = 2, alpha = 0.7) +  
+  facet_wrap(~ eps) + 
+  ggtitle('HbA1c vs Beta Cell Type Proportion') + theme_minimal() + 
+  scale_colour_manual( values = c('white', "gray20")) + 
+  scale_shape_manual(values = c(21, 24))
+```
+
+2.Influence of gene numbers on the MUSIC prediction
+
+```{r, include=FALSE}
+
+bulk.meta$Disease = factor( c('Normal', 'T2D')[(bulk.meta$hba1c > 6.5) + 1], c('Normal', 'T2D'))
+### table random samples by group: T2D or normal
+gene_size = c(.1, .3, .5, .8, 1)
+# Create dataframe for beta cell proportions and HbA1c levels
+res = ''
+j = 1
+for(i in 1:length(gene_size)) {
+  set.seed(567)
+  Est.prop.res = music_prop(
+    bulk.mtx = bulk.mtx %>% as.data.frame() %>% sample_frac(gene_size[i]) %>% as.matrix(),
+    sc.sce =  EMTAB.sce,
+    eps = i,
+    clusters = 'cellType',
+    samples = 'sampleID',
+    select.ct = c('alpha', 'beta', 'delta', 'gamma',
+                  'acinar', 'ductal'),
+    verbose = F
+  )
+  m.prop.ana = data.frame(
+    pData(GSE50244.bulk.eset)[,
+                              c('age', 'bmi', 'hba1c', 'gender')],
+    ct.prop = Est.prop.res$Est.prop.weighted[, 2],
+    Size = paste0(gene_size[i]*100, '% ','genes'),
+    Method = 'MuSiC'
+  ) %>% rownames_to_column(., var = 'Sample')
+  colnames(m.prop.ana)[1:5] = c('Sample','Age', 'BMI', 'HbA1c', 'Gender')
+  m.prop.ana = subset(m.prop.ana, !is.na(HbA1c))
+  m.prop.ana$Disease = factor( c('Normal', 'T2D')[(m.prop.ana$HbA1c > 6.5) + 1], c('Normal', 'T2D') )
+  m.prop.ana$D = (m.prop.ana$Disease == 'T2D')/5
+
+  res = rbind(res, m.prop.ana)
+  j = j + 1
+}
+
+res = res[-1,]
+
+res %>%
+  convert(num(HbA1c, ct.prop, D)) %>% 
+  convert(chr(Size)) %>% 
+  mutate(Size = factor(Size, levels = c("10% genes","30% genes",
+                                        "50% genes", "80% genes", "100% genes"))) %>% 
+  ggplot(., aes(HbA1c, ct.prop)) + 
+  #geom_smooth(method = 'lm',  se = FALSE, col = 'black', lwd = 0.25) +
+  sm_statCorr() + 
+  geom_point(aes(fill = Size, color = Disease, stroke = D,
+                 shape = Disease), size = 2, alpha = 0.7) +  
+  facet_wrap(~ Size, nrow = 1, ncol = 5) + 
+  ggtitle('HbA1c vs Beta Cell Type Proportion') + theme_minimal() + 
+  scale_colour_manual( values = c('white', "gray20")) + 
+  scale_shape_manual(values = c(21, 24))
+```
+
+- Performance of MUSIC on in-house data
+
+```{r, include=FALSE}
+
+meta_gather = function(){
+  meta = read.csv(file = paste0(workdir,'/01.Data/_OLINK_and_RNAseq_samples_by_Diagnosis.all.csv')) %>% 
+    select(Patient.Code,BMI, FIB.4.Index,
+           Age..in.years., Albumin..g.dL., ALT..IU.L., AST..IU.L.,
+           Platelets..x10.9., NASH.score, VIRUS, Aetiology,
+           Fibrosis.Stage, BCLC.Score, AFP, VIRUS)
+  return(meta)
+}
+
+workdir = '../../../00-ResearchProjects/00-SysMedicine/NAFLD/LiverDisease'
+load(paste0(workdir, '/VIRALNASHARLD_HCC/06.Deconlution/tissue.Rdata'))
+load(paste0(workdir, '/01.Data/LiverDisease.ran.seq.txi.Rdata'))
+count_bulk = txi_kallisto$counts %>% as.data.frame()
+tissue1 = CreateSeuratObject(counts = tissue@data, meta.data = tissue@meta.data)
+load(paste0(workdir, '/VIRALNASHARLD_HCC_3/02.Results/Olink_proteomics.STAT.limma.Rdata'))
+meta_RNA = read.csv(paste0(workdir, '/01.Data/_OLINK_and_RNAseq_samples_by_Diagnosis.RNA.csv')) %>% 
+  select(U, ID)
+mathched_RNA = olink$metadat %>%
+  left_join(meta_gather(), by = c("U" = "Patient.Code")) %>% 
+  filter(!is.na(Fibrosis.Group.in.paper)) %>% 
+  left_join(meta_RNA) %>% 
+  filter(Fibrosis.Group.in.paper != 'Healthy') %>% 
+  mutate(Fibrosis.Group.in.paper = case_when(
+    Fibrosis.Group.in.paper == 'F0-2' ~ 'F02',
+    TRUE ~ Fibrosis.Group.in.paper
+  ))
+
+count_bulk = count_bulk %>% dplyr::select(mathched_RNA$ID)
+#Idents(object = tissue1) = "liver"
+#tissue1 = subset(x = tissue1, idents = c('Cirrhotic1', 'Cirrhotic2', 'Cirrhotic3',
+#                                       'Cirrhotic4','Cirrhotic5'),invert = FALSE)
+Idents(tissue1) = 'annotation_indepth'
+markers_genes <- FindAllMarkers(tissue1, 
+                                log2FC.threshold = 0.2, 
+                                test.use = "wilcox",
+                                min.pct = 0.1, 
+                                min.diff.pct = 0.2, 
+                                only.pos = TRUE, 
+                                max.cells.per.ident = 50,
+                                assay = "RNA")
+
+linage2markers = markers_genes %>%
+  filter(p_val_adj < 0.05)
+
+sec = as.SingleCellExperiment(tissue1)
+########## Find out common genes
+c.genes = sort(intersect(rownames(count_bulk), rownames(sec)))
+sec = sec[c.genes,]
+count_bulk = as.matrix(count_bulk[c.genes,])
+########## using common genes
+clusters.type = as.character(unique(sec$annotation_indepth))
+names(clusters.type) = clusters.type
+
+Est.prop.res = music_prop(bulk.mtx = count_bulk, 
+                               sc.sce =  sec,
+                               clusters = 'annotation_indepth',
+                               samples = 'dataset')
+
+pdf('cell.pro.pdf', width = 6, height = 2.5)
+
+Heatmap(Est.prop.res$Est.prop.weighted, show_row_names = F, column_names_gp  = gpar(fontsize = 7), 
+        show_column_dend = F, col = colorRamp2(c(0,0.001, 1), c(alpha("#C7522B",0.1), alpha("#BBC297", 0.1),alpha("#3C5941", 0.1))),
+        name = 'Pro.')
+dev.off()
+```
+
+### DWLS, (https://github.com/dtsoucas/DWLS)
+```{r}
+allCounts_DWLS<-NULL
+allCounts_OLS<-NULL
+allCounts_SVR<-NULL
+
+for(j in 1:(dim(bulkData)[2])){
+  print(colnames(bulkData)[j])
+    S<- sig.matrix.mean %>% column_to_rownames(., var = 'gene') %>% as.matrix()
+    Bulk<-bulkData[,j] # extract every sample
+    names(Bulk)<-rownames(bulkData)
+    Genes<-intersect(rownames(S),names(Bulk))
+    S = S[Genes,]
+    Bulk<-Bulk[Genes]
+    solOLS<-solveOLS(S,Bulk)
+    solDWLS<-solveDampenedWLS(S,Bulk)
+    solSVR<-solveSVR(S,Bulk)
+
+    allCounts_DWLS<-cbind(allCounts_DWLS,solDWLS)
+    allCounts_OLS<-cbind(allCounts_OLS,solOLS)
+    allCounts_SVR<-cbind(allCounts_SVR,solSVR)
+}
+
+mappingDF = read.xlsx(paste0(workdir, '/VIRALNASHARLD_HCC/06.Deconlution/results/EMS84316-supplement-Suppl_Table_8 nno.xlsx'))
+resuktpred = Est.prop.res$Est.prop.weighted %>% as.data.frame() %>% 
+  select_if(colSums(.) != 0) %>% 
+  rownames_to_column(., var = 'ID') %>% 
+  gather(cell.type, pro, -ID) %>% 
+  convert(num(pro)) %>% 
+  left_join(mathched_RNA) %>% 
+  left_join(mappingDF, by = c("cell.type" = 'annotation_indepth')) %>%
+  mutate(cluster = factor(cluster, levels = unique(cluster)))
+metadata = olink$metadat %>%
+  left_join(meta_gather(), by = c("U" = "Patient.Code")) %>% 
+  filter(!is.na(Fibrosis.Group.in.paper)) %>% 
+  left_join(meta_RNA) %>% 
+  filter(Fibrosis.Group.in.paper != 'Healthy') %>% 
+  select(ID, Fibrosis.Group.in.paper, BMI, `Albumin..g.dL.`, 
+         `ALT..IU.L.`, `AST..IU.L.`, `Platelets..x10.9.`, `FIB.4.Index`) %>% 
+  set_colnames(c("ID", "Fibrosis.Group.in.paper","BMI", 
+                 "Albumin", "ALT","AST","Platelets","FIB4"))
+
+resuktpred = metadata %>% select(ID, Fibrosis.Group.in.paper) %>%
+  left_join(
+    allCounts_SVR %>% as.data.frame() %>%
+      rownames_to_column(., var = 'cell.type') %>%
+      gather(ID, pro,-cell.type) %>% convert(num(pro))
+  ) %>%
+  mutate(cell.type = str_replace_all(cell.type, '_', ' ')) %>%
+  mutate(cell.type = str_replace_all(cell.type, '([0-9])', '(\\1)')) %>%
+  left_join(mappingDF, by = c("cell.type" = 'annotation_indepth')) %>%
+  mutate(cluster = factor(cluster, levels = unique(cluster)))
+ 
+prep_stacked_bar = resuktpred %>% 
+  mutate(Fibrosis.Group.in.paper = factor(Fibrosis.Group.in.paper, 
+                              levels = c("F4","F3","F0-2"))) %>% 
+    ggplot(., aes(Fibrosis.Group.in.paper, pro)) +
+    geom_col(aes(fill = cluster),
+             position = 'fill') +
+    scale_y_continuous(expand = range(0,0)) +
+    theme_classic() + 
+    scale_fill_manual(values = alpha(hcl.colors(44, palette = "Fall"),0.5)) +
+    labs(y = 'Cell Proportion', x = '', fill = 'Cell Cluster') +
+    plot_theme('nogrid') +
+    theme(axis.text = element_text(size = 7, color = 'black'),
+          axis.title = element_text(size = 8, color = 'black')) +
+  coord_flip()
+
+ggsave(prep_stacked_bar, file = 'decon.prediction.DWLS.pdf',
+       width = 7.3, height = 2.8)
+```
+
+
